@@ -14,7 +14,9 @@ app.set('trust proxy', 1);
 app.use(express.json());
 
 // --- PHASE 5: SECURITY HARDENING ---
-app.use(helmet());
+app.use(helmet({
+    contentSecurityPolicy: false,
+}));
 
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -22,6 +24,10 @@ const apiLimiter = rateLimit({
     message: { success: false, message: 'Too many requests' }
 });
 app.use('/api/', apiLimiter);
+
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: Date.now() });
+});
 
 const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
 const ADMIN_TOKEN_TTL = process.env.ADMIN_TOKEN_TTL || '8h';
@@ -542,8 +548,21 @@ app.get('/admin/monitor', verifyAdminToken, async (req, res) => {
     });
 });
 
+// Admin Page Routes
 app.get('/admin/panel', (req, res) => {
     return res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
+app.get('/admin/users_page', (req, res) => {
+    return res.sendFile(path.join(__dirname, 'public', 'admin_users.html'));
+});
+
+app.get('/admin/messages_page', (req, res) => {
+    return res.sendFile(path.join(__dirname, 'public', 'admin_messages.html'));
+});
+
+app.get('/admin/live_page', (req, res) => {
+    return res.sendFile(path.join(__dirname, 'public', 'admin_live.html'));
 });
 
 function detachSocket(ws) {
@@ -678,7 +697,8 @@ wss.on('connection', async (ws, req) => {
                     from: safeFrom,
                     to: safeTo,
                     payload: msg.payload,
-                    timestamp
+                    timestamp,
+                    messageId: dbMessage._id
                 }));
                 console.log(`WS route ok from=${safeFrom} to=${safeTo}`);
                 pushConnectionLog('message_routed', safeFrom, { to: safeTo });
