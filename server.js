@@ -79,6 +79,8 @@ const UserSchema = new mongoose.Schema({
     bannedReason: { type: String, default: null },
     lastLoginAt: { type: Date, default: null },
     publicKey: { type: String },
+    profileVisible: { type: Boolean, default: true },
+    readReceiptsEnabled: { type: Boolean, default: true },
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', UserSchema);
@@ -142,10 +144,46 @@ app.post('/api/auth/login', async (req, res) => {
             success: true,
             message: 'Login successful',
             token,
-            user: { id: user._id, username: user.username, email: user.email, role: user.role }
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                role: user.role,
+                profileVisible: user.profileVisible,
+                readReceiptsEnabled: user.readReceiptsEnabled
+            }
         });
     } catch (e) {
         res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+async function verifyToken(req, res, next) {
+    try {
+        const auth = req.headers.authorization || '';
+        if (!auth.startsWith('Bearer ')) return res.status(401).json({ success: false, message: 'Missing token' });
+        const token = auth.slice(7).trim();
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+        req.userId = payload.userId;
+        next();
+    } catch (e) {
+        res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+}
+
+app.post('/api/user/privacy', verifyToken, async (req, res) => {
+    try {
+        const { profileVisible, readReceiptsEnabled } = req.body;
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+        if (typeof profileVisible === 'boolean') user.profileVisible = profileVisible;
+        if (typeof readReceiptsEnabled === 'boolean') user.readReceiptsEnabled = readReceiptsEnabled;
+
+        await user.save();
+        res.json({ success: true, message: 'Privacy settings updated' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: 'Failed to update privacy settings' });
     }
 });
 
@@ -575,10 +613,10 @@ function detachSocket(ws) {
 
 function validateMessage(msg) {
     if (!msg || typeof msg !== 'object') return false;
-    if (msg.type !== 'message') return false;
+    if (msg.type !== 'message' && msg.type !== 'read_receipt') return false;
     if (typeof msg.from !== 'string' || msg.from.trim() === '') return false;
     if (typeof msg.to !== 'string' || msg.to.trim() === '') return false;
-    if (typeof msg.payload !== 'string') return false;
+    if (msg.type === 'message' && typeof msg.payload !== 'string') return false;
     return true;
 }
 
@@ -672,7 +710,6 @@ wss.on('connection', async (ws, req) => {
 
             const safeFrom = msg.from.trim();
             const safeTo = msg.to.trim();
-            const timestamp = Number(msg.timestamp) || Date.now();
 
             if (safeFrom !== registeredUserId) {
                 console.warn(`Message dropped: sender mismatch from=${safeFrom} registered=${registeredUserId}`);
@@ -682,32 +719,46 @@ wss.on('connection', async (ws, req) => {
                 return;
             }
 
-            const dbMessage = new Message({
-                from: safeFrom,
-                to: safeTo,
-                message: msg.payload,
-                timestamp
-            });
-            await dbMessage.save();
-
-            const target = clients.get(safeTo);
-            if (target && target.readyState === WebSocket.OPEN) {
-                target.send(JSON.stringify({
-                    type: 'message',
+            if (msg.type === 'message') {
+                const timestamp = Number(msg.timestamp) || Date.now();
+                const dbMessage = new Message({
                     from: safeFrom,
                     to: safeTo,
-                    payload: msg.payload,
-                    timestamp,
-                    messageId: dbMessage._id
-                }));
-                console.log(`WS route ok from=${safeFrom} to=${safeTo}`);
-                pushConnectionLog('message_routed', safeFrom, { to: safeTo });
-                broadcastMonitorSnapshot();
-            } else {
-                console.warn(`WS route miss from=${safeFrom} to=${safeTo}`);
-                pushConnectionLog('route_miss', safeFrom, { to: safeTo });
-                broadcastMonitorSnapshot();
+                    message: msg.payload,
+                    timestamp
+                });
+                await dbMessage.save();
+
+                const target = clients.get(safeTo);
+                if (target && target.readyState === WebSocket.OPEN) {
+                    target.send(JSON.stringify({
+                        type: 'message',
+                        from: safeFrom,
+                        to: safeTo,
+                        payload: msg.payload,
+                        timestamp,
+                        messageId: dbMessage._id
+                    }));
+                    console.log(`WS route ok from=${safeFrom} to=${safeTo}`);
+                    pushConnectionLog('message_routed', safeFrom, { to: safeTo });
+                    broadcastMonitorSnapshot();
+                } else {
+                    console.warn(`WS route miss from=${safeFrom} to=${safeTo}`);
+                    pushConnectionLog('route_miss', safeFrom, { to: safeTo });
+                    broadcastMonitorSnapshot();
+                }
+            } else if (msg.type === 'read_receipt') {
+                const target = clients.get(safeTo);
+                if (target && target.readyState === WebSocket.OPEN) {
+                    target.send(JSON.stringify({
+                        type: 'read_receipt',
+                        from: safeFrom,
+                        to: safeTo,
+                        messageId: msg.messageId
+                    }));
+                }
             }
+
         } catch (e) {
             console.error("WS Message Error:", e.message);
             if (ws.readyState === WebSocket.OPEN) {
